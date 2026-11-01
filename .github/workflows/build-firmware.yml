@@ -244,6 +244,27 @@ jobs:
             exit 1
           fi
 
+      # [custom] 2026-11-01：构建失败时把 OpenWrt 构建树里的 compile.txt 打到控制台。
+      # 原因：make world 用 V=w，子 make 的编译错误被 include/verbose.mk 的 SILENT 吞掉，
+      # build.log 只剩「ERROR: package/xxx failed to build」一行，无法定位根因。
+      # 注意路径要递归找：feed 包在 logs/package/feeds/packages/<pkg>/compile.txt（四层）。
+      - name: Dump failing package logs
+        if: failure()
+        run: |
+          for f in $(ls -t $(find logs -name 'compile.txt' 2>/dev/null) 2>/dev/null | head -3); do
+            echo "----- $f -----"
+            tail -80 "$f"
+          done
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xr1710g-build-logs
+          path: logs/
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Report image size
         if: always()
         run: |

@@ -233,11 +233,27 @@ jobs:
             tail -100 build.log
           fi
           ls -la bin/targets/airoha/an7581/ 2>/dev/null || echo "No files found in an7581 directory"
-          echo "== 失败包的详细编译日志（最近修改的 4 个 compile.txt）=="
-          for f in $(ls -t logs/package/*/*/compile.txt logs/toolchain/*/compile.txt 2>/dev/null | head -4); do
+          echo "== 失败包的详细编译日志（最近修改的 3 个 compile.txt）=="
+          # [custom] 2026-11-01：原 glob 写作 logs/package/*/*/compile.txt，只匹配两层；
+          # 而 feed 包的真实路径是 logs/package/feeds/packages/python3/compile.txt（四层），
+          # 所以 python3 这类包的编译日志从来没被打出来过 —— 这也是 10-26 / 11-01
+          # 两次盲修的直接原因。改用 find 递归定位，按修改时间取最新 3 个。
+          for f in $(ls -t $(find logs -name 'compile.txt' 2>/dev/null) 2>/dev/null | head -3); do
             echo "----- $f -----"
             tail -80 "$f"
           done
+
+      # [custom] 2026-11-01：把整个构建树 logs/ 作为 artifact 上传。
+      # make world 用 V=w，子 make 的编译错误被 include/verbose.mk 的 SILENT 吞掉，
+      # build.log 只剩「ERROR: package/xxx failed to build」一行，无法定位根因。
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xg2010g-build-logs
+          path: logs/
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Report image size
         if: always()
