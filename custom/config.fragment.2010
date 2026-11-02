@@ -223,7 +223,15 @@ CONFIG_KERNEL_CGROUP_BPF=y
 # kenzok8 的 daed/dae 声明了 +@KERNEL_XDP_SOCKETS，2010.config 默认是关的
 CONFIG_KERNEL_XDP_SOCKETS=y
 
-# ---- 修复 python3 编译缺 libffi（immortalwrt/packages upstream 缺失 DEPENDS）----
+# ---- libffi：python3 编 _ctypes 的必需项 ----
+# 2026-11-02 定位：python3 用 --with-system-ffi + PYTHONSTRICTEXTENSIONBUILD=1，
+# _ctypes 一定会被编译并要求 staging 里有 ffi.h。原先这行 =y 是无效的 ——
+# 因为 naoki66 上游树里 package/libs/libffi 整个包都不存在
+# （immortalwrt 主树有 3.8.0，naoki66 树递归搜索 libffi 结果为空），
+# kconfig 对不存在的符号静默忽略，构建时只会打
+#   WARNING: Makefile 'package/feeds/packages/glib2/Makefile' has a dependency on 'libffi', which does not exist
+# 然后 python3 报 Modules/_ctypes/_ctypes.c:119:10: fatal error: ffi.h: No such file or directory。
+# 已把 package/libs/libffi 从 immortalwrt 主树补回本仓库，这行才真正生效。
 CONFIG_PACKAGE_libffi=y
 
 # ---- TC-eBPF 内核模块（daed 的 DEPENDS 会自动带，这里显式写出便于核对）----

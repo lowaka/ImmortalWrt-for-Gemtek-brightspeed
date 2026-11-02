@@ -223,7 +223,19 @@ jobs:
       - name: Build Firmware
         shell: bash
         run: |
-          make -j$(nproc) world 2>&1 | tee build.log
+          # [custom] 2026-11-02 加 V=w，与 build-firmware.yml（XR1710G）保持一致。
+          # 原因：OpenWrt 默认非 verbose 时，子 make 的 stdout/stderr 被 include/verbose.mk
+          # 的 SILENT 整体丢进 /dev/null：
+          #   SILENT:=/dev/null $(if $(findstring w,$(OPENWRT_VERBOSE)),,2>&1)
+          #   SUBMAKE=cmd() { $(SILENT) $(MAKE) -s "$@" ... } 8>&1 9>&2
+          # 只有 OpenWrt 自己经 MESSAGE/ERROR_MESSAGE 宏（写 >&8 / >&9）输出的内容可见，
+          # gcc/ld 这类外部工具的报错走 fd2，会被一起吞掉 —— 表现就是 build.log 只剩
+          # 「ERROR: package/xxx failed to build」一行：11-01 的 XG2010G 日志只有 280 行，
+          # 完全看不到 python3 的 ffi.h 报错；而 XR1710G 加了 V=w 后一次就定位到了。
+          # V=w 的语义（include/verbose.mk）：findstring w 命中 → 不追加 2>&1，
+          # 于是 SILENT 只剩 >/dev/null，**保留 stderr**、仅丢弃命令回显。
+          # 不用 V=s：全量 verbose 会把每条编译命令都打进日志，几十万行。
+          make -j$(nproc) world V=w 2>&1 | tee build.log
 
       - name: Check build status
         if: always()
@@ -233,27 +245,19 @@ jobs:
             tail -100 build.log
           fi
           ls -la bin/targets/airoha/an7581/ 2>/dev/null || echo "No files found in an7581 directory"
-          echo "== 失败包的详细编译日志（最近修改的 3 个 compile.txt）=="
-          # [custom] 2026-11-01：原 glob 写作 logs/package/*/*/compile.txt，只匹配两层；
-          # 而 feed 包的真实路径是 logs/package/feeds/packages/python3/compile.txt（四层），
-          # 所以 python3 这类包的编译日志从来没被打出来过 —— 这也是 10-26 / 11-01
-          # 两次盲修的直接原因。改用 find 递归定位，按修改时间取最新 3 个。
-          for f in $(ls -t $(find logs -name 'compile.txt' 2>/dev/null) 2>/dev/null | head -3); do
-            echo "----- $f -----"
-            tail -80 "$f"
-          done
-
-      # [custom] 2026-11-01：把整个构建树 logs/ 作为 artifact 上传。
-      # make world 用 V=w，子 make 的编译错误被 include/verbose.mk 的 SILENT 吞掉，
-      # build.log 只剩「ERROR: package/xxx failed to build」一行，无法定位根因。
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: xg2010g-build-logs
-          path: logs/
-          retention-days: 7
-          if-no-files-found: warn
+          echo "== 编译期致命错误（V=w 已保留 stderr，直接查 build.log）=="
+          # [custom] 2026-11-02：删掉对 logs/ 目录的依赖。
+          # OpenWrt 只在 `make package/<pkg>/compile V=s` 时才写
+          # logs/package/<pkg>/compile.txt，`make world` 根本不生成该目录 ——
+          # 11-01 那次构建的 Upload build logs 因此报
+          #   "No files were found with the provided path: logs/"
+          # 并且按 compile.txt 找根因的思路从源头上就是空的。
+          # 现在 V=w 已让子 make 的 stderr 进入 build.log，直接在这里定位。
+          grep -n "fatal error:" build.log 2>/dev/null | head -20 || true
+          echo "== fatal error 上下文 =="
+          grep -n -B2 -A10 "fatal error:" build.log 2>/dev/null | head -60 || true
+          echo "== make 的 Error 行（尾部）=="
+          grep -n -E "make(\[[0-9]+\])?: \*\*\* .*Error [0-9]" build.log 2>/dev/null | tail -15 || true
 
       - name: Report image size
         if: always()
