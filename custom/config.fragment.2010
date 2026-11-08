@@ -172,7 +172,7 @@ CONFIG_PACKAGE_luci-theme-aurora=y
 
 # ---------- ⑤ 语音：保留"运营商语音通话"，去掉"电话主机/PBX"功能 ----------
 # 保留（插电话线能正常打电话所必需）：
-CONFIG_PACKAGE_airoha-voice-ctl=y
+# CONFIG_PACKAGE_airoha-voice-ctl is not set  # 上游 airoha-voice 内核模块编译失败，暂时禁用
 CONFIG_PACKAGE_asterisk=y
 CONFIG_PACKAGE_asterisk-pjsip=y
 CONFIG_PACKAGE_asterisk-chan-en75xx=y
@@ -233,6 +233,9 @@ CONFIG_KERNEL_XDP_SOCKETS=y
 # 然后 python3 报 Modules/_ctypes/_ctypes.c:119:10: fatal error: ffi.h: No such file or directory。
 # 已把 package/libs/libffi 从 immortalwrt 主树补回本仓库，这行才真正生效。
 CONFIG_PACKAGE_libffi=y
+
+# ---- python3 依赖 glib2，显式启用以避免编译失败 ----
+CONFIG_PACKAGE_glib2=y
 
 # ---- TC-eBPF 内核模块（daed 的 DEPENDS 会自动带，这里显式写出便于核对）----
 CONFIG_PACKAGE_kmod-sched-core=y
