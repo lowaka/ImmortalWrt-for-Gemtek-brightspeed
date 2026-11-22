@@ -2,6 +2,17 @@ name: Build XR1710G Firmware
 # 本文件 = naoki66 上游 workflow + 本仓库定制 hook（custom/ 目录）。
 # 同步上游时若与本文件冲突会保留本文件版本（见 sync-upstream.yml 里写入的 .git/info/attributes）。
 # 定制文件名规则：immortalwrt-<日期>-<仓库提交>-<上游提交>-<目标>-<设备>-<镜像类型>.itb
+#
+# 2026-11-22：并入上游 475b6b67 的 CI 改进（见各处 [upstream] 标注）：
+#   - runner 固定 ubuntu-24.04（ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26）
+#   - 新增 Select feed providers（helloworld 的代理包必须压过 packages 同名包）
+#   - Configure 改为「先 make defconfig 再写版本字段」，避免被默认值覆盖
+#   - 新增 libffi host 构建依赖校验
+#   - Download / Build 加 BUILD_LOG=1，失败时自动用 V=s 重编失败包
+#   - 发布前校验 tag 指向的提交，Release 加 target_commitish
+# 未采纳（与上游多机型矩阵/feed 白名单强绑定，直接引入会失败）：
+#   check-distfeeds.sh（硬编码含 pushbot、且遍历已删除的 2010-2g.config）、
+#   check-gemtek-profile-isolation.sh、check-firmware-artifacts.sh。
 
 on:
   push:
@@ -48,7 +59,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # [upstream] 固定 runner 镜像：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26，
+    # OpenWrt 的 host 工具链在 26 上未经验证，必须钉住。
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -65,6 +78,7 @@ jobs:
           git fetch --no-tags upstream master
 
           build_date=$(TZ=Asia/Shanghai date +'%Y%m%d')
+          repo_commit_full=$(git rev-parse HEAD)
           repo_commit=$(git rev-parse --short=8 HEAD)
           upstream_base=$(git merge-base HEAD upstream/master)
           upstream_commit=$(git rev-parse --short=8 "$upstream_base")
@@ -73,6 +87,8 @@ jobs:
           echo "date=$build_date" >> $GITHUB_OUTPUT
           echo "build_id=$build_id" >> $GITHUB_OUTPUT
           echo "repo_commit=$repo_commit" >> $GITHUB_OUTPUT
+          # [upstream] 完整提交号：Release 的 target_commitish 与 tag 校验都要用
+          echo "repo_commit_full=$repo_commit_full" >> $GITHUB_OUTPUT
           echo "upstream_commit=$upstream_commit" >> $GITHUB_OUTPUT
           echo "Build version: ImmortalWrt for XR1710G ${build_id}"
 
@@ -157,6 +173,16 @@ jobs:
           echo "移除数量: $removed"
           echo "== daede feed 安装情况 =="
           ls -l package/feeds/daede/ 2>/dev/null || echo "（没有找到 package/feeds/daede）"
+
+      - name: Select feed providers
+        # [upstream] feeds/packages 与 feeds/helloworld 有同名源包（xray-core、
+        # v2ray-core、mosdns 等），而 ./scripts/feeds install -a 按 feeds.conf
+        # 顺序只保留第一个 provider，导致 helloworld 里带 AN7581 EIP93 AES-GCM
+        # 加速的 xray-core 进不了镜像。此脚本把首选 feed 的源包链接固定下来。
+        # preferred_feeds 只含 helloworld，本仓库的 feeds.conf.default 里有它，
+        # 因此 FEED_PATCHES_STRICT=1 不会因缺 feed 而失败。
+        run: FEED_PATCHES_STRICT=1 bash scripts/select-feed-providers.sh
+
       - name: Apply feed patches
         run: |
           # [custom] 上游脚本在旧树里可能还不存在，存在才执行
@@ -173,6 +199,10 @@ jobs:
           if [ -f custom/config.fragment ]; then
             cat custom/config.fragment >> .config
           fi
+          # [upstream] 先让 defconfig 补齐/校正配置，再写版本字段。
+          # 顺序反了会被默认值覆盖：set-build-version.sh 的文档明确要求
+          # 「cp 种子 -> make defconfig 后 CONFIG_TARGET_PROFILE 仍在」再推导设备型号。
+          make defconfig
           # [custom] VERSION_DIST / VERSION_NUMBER 决定文件名前缀
           VERSION_DIST='immortalwrt' \
           VERSION_NUMBER='${{ steps.version.outputs.build_id }}' \
@@ -182,14 +212,37 @@ jobs:
           UPSTREAM_COMMIT='${{ steps.version.outputs.upstream_commit }}' \
           VERSION_CODE='${{ steps.version.outputs.build_id }}' \
           bash scripts/set-build-version.sh .config
-          make defconfig
-          grep -E 'CONFIG_(IMAGEOPT|EXTRA_IMAGE_NAME|VERSIONOPT|VERSION_DIST|VERSION_NUMBER|VERSION_CODE|VERSION_FILENAMES|VERSION_CODE_FILENAMES)[= ]' .config
+          echo "== 版本字段 =="
+          grep -E 'CONFIG_(IMAGEOPT|EXTRA_IMAGE_NAME|VERSIONOPT|VERSION_DIST|VERSION_PRODUCT|VERSION_NUMBER|VERSION_CODE|VERSION_FILENAMES|VERSION_CODE_FILENAMES)[= ]' .config
+          # 版本字段写入后必须真的生效，否则固件名/页脚会退回默认值
+          grep -q '^CONFIG_VERSION_NUMBER="' .config || { echo "::error::CONFIG_VERSION_NUMBER 未写入"; exit 1; }
+          grep -q '^CONFIG_VERSION_DIST="immortalwrt' .config || { echo "::error::CONFIG_VERSION_DIST 不是 immortalwrt 前缀"; exit 1; }
           echo "== 透明代理（只保留 daed）=="
           grep -E 'CONFIG_PACKAGE_(luci-app-homeproxy|luci-i18n-homeproxy-zh-cn|homeproxy|sing-box|luci-app-nikki|luci-i18n-nikki-zh-cn|nikki|mihomo-meta|yq|luci-app-daede|luci-app-daede_daed|luci-app-daede_dae|luci-app-daed|daed|v2ray-geoip|v2ray-geosite)(=| is not set)' .config | sort || true
           echo "== daed 相关内核开关 =="
           grep -E 'CONFIG_KERNEL_(DEBUG_INFO_BTF|DEBUG_INFO_REDUCED|BPF_EVENTS|BPF_STREAM_PARSER|XDP_SOCKETS)' .config || true
           echo "== BPF 工具链 =="
           grep -E '^CONFIG_(DEVEL|BPF_TOOLCHAIN_HOST|BPF_TOOLCHAIN_NONE|BPF_TOOLCHAIN_BUILD_LLVM|USE_LLVM_HOST)=' .config || true
+
+      - name: Verify libffi build dependency
+        # [upstream] libffi 必须提供 host 构建类型，否则 python3 的 host 依赖链断裂。
+        # 2026-11 上游补丁改名（100-add-libffi-build-depend.patch →
+        # 100-build-depend-on-libffi.patch）期间曾出现缺失，这里做静态校验。
+        run: |
+          test -f package/libs/libffi/Makefile
+          awk '
+            /^Source-Makefile:/ { in_libffi = ($2 == "package/libs/libffi/Makefile") }
+            in_libffi && /^Package: libffi$/ { have_package = 1 }
+            in_libffi && /^Build-Types:/ {
+              for (i = 2; i <= NF; i++) if ($i == "host") have_host = 1
+            }
+            END {
+              if (!have_package || !have_host) {
+                print "libffi package with host build support is missing from package metadata" > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' tmp/.packageinfo
 
       - name: Prepare custom files overlay
         run: |
@@ -198,7 +251,8 @@ jobs:
           cp -a custom/files/. files/
 
       - name: Download sources
-        run: make download -j$(nproc)
+        # [upstream] BUILD_LOG=1 让每个包的下载过程落到 logs/，下载失败时可直接定位
+        run: make download -j$(nproc) BUILD_LOG=1 2>&1 | tee download.log
 
       - name: Build Firmware
         shell: bash
@@ -217,7 +271,32 @@ jobs:
           # V=w 的语义（include/verbose.mk:61）：findstring w 命中 → 不追加 2>&1
           #   → SILENT 只剩 >/dev/null，**保留 stderr**、仅丢弃命令回显。
           # 不敢用 V=s：全量 verbose 会把每条编译命令都打进日志，几十万行。
-          make -j2 world V=w 2>&1 | tee build.log
+          #
+          # [upstream] BUILD_LOG=1 额外把每个包的完整日志写进 logs/<pkg>/，
+          # 与 V=w 互补：V=w 保 stderr，BUILD_LOG 保全量。
+          make -j2 world BUILD_LOG=1 V=w 2>&1 | tee build.log
+
+      - name: Verbose retry on build failure
+        # [upstream] 失败时定位到具体包，用 V=s 单包重编，把真正的错误抓出来。
+        # 放在 Check build status 之前，让日志里先出现根因，再出现产物清单。
+        if: failure()
+        shell: bash
+        run: |
+          bash scripts/summarize-build-errors.sh build.log || true
+          failed_pkg=$(grep 'ERROR:.*failed to build' build.log | head -1 | sed 's/.*ERROR: \(.*\) failed to build.*/\1/' || true)
+          if [ -n "$failed_pkg" ]; then
+            echo "=== Rebuilding $failed_pkg with V=s ==="
+            retry_status=0
+            make "${failed_pkg}/compile" BUILD_LOG=1 V=s -j1 2>&1 | tee build-verbose.log || retry_status=$?
+            echo "=== First errors in build-verbose.log ==="
+            grep -nE "error:|Error [0-9]|FAILED|Patch failed|No rule to make target" build-verbose.log | head -40 || true
+            echo "=== tail of build-verbose.log ==="
+            tail -80 build-verbose.log || true
+            exit "$retry_status"
+          else
+            echo "No failing package found in build.log" >&2
+            tail -150 build.log || true
+          fi
 
       - name: Check build status
         if: always()
@@ -240,7 +319,7 @@ jobs:
           # 后续 Collect proxy packages / Upload artifacts 都是 if: always()，
           # 仍会照常执行，代理 .apk 和 build.log 不会丢。
           if ! ls bin/targets/airoha/an7581/*sysupgrade.itb >/dev/null 2>&1; then
-            echo "::error::未产出 sysupgrade.itb，构建失败。根因见上面 Build Firmware 步骤（已用 V=w 保留工具 stderr）"
+            echo "::error::未产出 sysupgrade.itb，构建失败。根因见上面 Build Firmware / Verbose retry 步骤"
             exit 1
           fi
 
@@ -320,7 +399,10 @@ jobs:
         with:
           name: xr1710g-firmware
           path: |
+            download.log
             build.log
+            build-verbose.log
+            logs/
             bin/targets/airoha/an7581/*.itb
             bin/targets/airoha/an7581/*.manifest
             bin/targets/airoha/an7581/config.buildinfo
@@ -352,11 +434,22 @@ jobs:
             echo "EOF"
           } >> $GITHUB_OUTPUT
 
+      - name: Verify release tag
+        # [upstream] 同名 tag 已存在但指向别的提交时，gh-release 会复用旧 tag，
+        # 导致产物与 tag 的提交对不上。这里提前拒绝。
+        if: github.event_name == 'push' || github.event.inputs.release_type != 'none'
+        env:
+          RELEASE_TAG: ${{ format('{0}-{1}', steps.version.outputs.date, steps.version.outputs.repo_commit) }}
+          BUILD_COMMIT: ${{ steps.version.outputs.repo_commit_full }}
+        run: bash scripts/check-release-tag.sh "$RELEASE_TAG" "$BUILD_COMMIT"
+
       - name: Create Release
         if: github.event_name == 'push' || github.event.inputs.release_type != 'none'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ format('{0}-{1}', steps.version.outputs.date, steps.version.outputs.repo_commit) }}
+          # [upstream] 显式指定目标提交，避免 tag 被复用到别的提交上
+          target_commitish: ${{ steps.version.outputs.repo_commit_full }}
           name: ${{ format('ImmortalWrt for XR1710G {0}', steps.version.outputs.build_id) }}
           body: ${{ steps.release_body.outputs.body }}
           draft: false
