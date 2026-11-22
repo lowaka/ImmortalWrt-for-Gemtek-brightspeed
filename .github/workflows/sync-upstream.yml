@@ -5,15 +5,30 @@ name: Sync Upstream (naoki66)
 #
 # 只跟随 naoki66 的树，不再直接合并 immortalwrt/immortalwrt：
 # immortalwrt 由 naoki66 负责合并，本仓库再直连上游只会制造重复合并和冲突。
-# （历史上这里同时拉 immortalwrt，冲突时靠「跳过 + 警告」兜底，实际上并没有必要。）
 #
 # 本工作流只负责同步，**不再自动触发固件构建** ——
 # 想构建时到 Actions 页手动运行 Build XR1710G Firmware / Build XG2010G Firmware。
+#
+# 2026-11-22：naoki66 重写过一次上游历史，导致本仓库最后合并过的上游提交
+# e3b8c659 不再可达，merge-base 回退到 2016-05-05，git merge 产生 903 个冲突。
+# 已用「上游树 + 定制层覆盖」重建基线（提交 4751cf7c）。为免再次卡死，
+# 这里加入 reanchor 模式：merge 模式下若冲突规模与基线年龄同时异常，
+# 会明确提示改用 mode=reanchor 重跑，而不是丢一堆冲突文件让人手工解。
 
 on:
   schedule:
     - cron: '0 19 */3 * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '同步方式：auto=先尝试合并，失败则报错；merge=强制合并；reanchor=用上游树重建基线'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - merge
+          - reanchor
 
 permissions:
   contents: write
@@ -58,53 +73,133 @@ jobs:
         run: |
           git fetch --no-tags parent +refs/heads/master:refs/remotes/parent/master
 
-      - name: Merge updates
-        id: merge
+      - name: Sync
+        id: sync
+        env:
+          MODE: ${{ inputs.mode || 'auto' }}
         run: |
-          ref=parent/master
-          if git merge-base --is-ancestor "$ref" HEAD; then
-            echo "== $ref：没有新提交，跳过"
+          set -euo pipefail
+          up=parent/master
+          up_sha="$(git rev-parse "$up")"
+
+          if git merge-base --is-ancestor "$up" HEAD; then
+            echo "== $up：没有新提交，跳过"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          ahead="$(git rev-list --count HEAD.."$ref")"
-          echo "== $ref：领先 HEAD ${ahead} 个提交，尝试合并"
+          base="$(git merge-base HEAD "$up" 2>/dev/null || true)"
+          if [ -z "$base" ]; then
+            echo "::error::HEAD 与上游没有共同祖先，只能使用 mode=reanchor"
+            exit 1
+          fi
+          base_days=$(( ( $(date +%s) - $(git log -1 --format=%ct "$base") ) / 86400 ))
+          echo "== merge-base = ${base:0:10}（$(git log -1 --format=%cs "$base")，距今 ${base_days} 天）"
+          echo "== 上游 ${up_sha:0:10} 领先 HEAD $(git rev-list --count HEAD.."$up") 个提交"
 
-          if git merge --no-edit "$ref"; then
+          # ---------------- reanchor：用上游树重建基线 ----------------
+          if [ "$MODE" = "reanchor" ]; then
+            anchor="$(grep -vE '^[[:space:]]*#' custom/upstream/last-synced.txt 2>/dev/null | tr -d '[:space:]' || true)"
+            if [ -z "$anchor" ]; then
+              echo "::error::custom/upstream/last-synced.txt 缺失或为空，无法计算定制层"
+              exit 1
+            fi
+            if [ "$(git cat-file -t "$anchor" 2>/dev/null || true)" != "commit" ]; then
+              echo "::error::last-synced.txt 记录的 $anchor 不是本仓库里的提交对象"
+              exit 1
+            fi
+            echo "== 定制层基准 = ${anchor:0:10}"
+
+            git read-tree "$up_sha"
+
+            git diff --name-status "$anchor" HEAD > /tmp/layer.txt
+            echo "== 定制层共 $(wc -l < /tmp/layer.txt) 个文件"
+            warn=0
+            while IFS=$'\t' read -r st path _rest; do
+              [ -n "${path:-}" ] || continue
+              # 上游在同期也改过这个文件：覆盖会丢掉上游改动，逐条列出来供复核
+              if ! git diff --quiet "$anchor" "$up_sha" -- "$path" 2>/dev/null; then
+                echo "::warning::$path 上游也改过，本次以本仓库版本为准，请复核"
+                warn=$((warn + 1))
+              fi
+              case "$st" in
+                A|M)
+                  read -r m _t s <<<"$(git ls-tree HEAD -- "$path" | awk '{print $1, $2, $3}')"
+                  git update-index --add --cacheinfo "$m,$s,$path"
+                  ;;
+                D)
+                  git update-index --force-remove -- "$path" 2>/dev/null || true
+                  ;;
+                *)
+                  echo "::error::未预期的差异状态 $st：$path"
+                  exit 1
+                  ;;
+              esac
+            done < /tmp/layer.txt
+            echo "== 其中上游也改过的有 $warn 个"
+
+            # 记录本次基线，供下次 reanchor 计算定制层
+            printf '%s\n' "$up_sha" > /tmp/last-synced.txt
+            ls_sha="$(git hash-object -w /tmp/last-synced.txt)"
+            git update-index --add --cacheinfo "100644,$ls_sha,custom/upstream/last-synced.txt"
+
+            tree="$(git write-tree)"
+            new="$(git commit-tree "$tree" -p HEAD -p "$up_sha" -m "reanchor: 以上游 ${up_sha:0:10} 重建基线")"
+            git reset --hard "$new"
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "merged=$ref" >> "$GITHUB_OUTPUT"
-            echo "已合并：$ref"
+            echo "== 已生成基线提交 ${new:0:10}，父提交为 HEAD 与上游"
             exit 0
           fi
 
-          # 冲突了。这里故意不自动兜底：本仓库与上游在少量文件上是「双方都改过」的
-          # 实质分歧（目前是 README.md 与 feeds.conf.default），自动选一边会把另一边的
-          # 改动悄悄丢掉。宁可失败并留下冲突清单，让人工决定。
-          echo "::error::合并 $ref 出现冲突，需要人工处理。冲突文件："
-          git diff --name-only --diff-filter=U
-          echo "::error::解完冲突后重新跑一次本工作流即可。"
+          # ---------------- auto / merge：正常三方合并 ----------------
+          set +e
+          git merge --no-commit --no-ff "$up"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            printf '%s\n' "$up_sha" > custom/upstream/last-synced.txt
+            git add custom/upstream/last-synced.txt
+            git commit --allow-empty -m "Merge upstream naoki66@${up_sha:0:10}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "== 已合并 ${up_sha:0:10}"
+            exit 0
+          fi
+
+          conflicts="$(git diff --name-only --diff-filter=U | wc -l)"
+          echo "::error::合并出现 $conflicts 个冲突"
+          git diff --name-only --diff-filter=U | head -40
           git merge --abort || true
+
+          # 这里故意不自动兜底：本仓库与上游在少量文件上是「双方都改过」的实质分歧，
+          # 自动选一边会把另一边的改动悄悄丢掉。宁可失败并留下冲突清单，让人工决定。
+          if [ "$conflicts" -ge 50 ] || [ "$base_days" -ge 180 ]; then
+            echo "::error::冲突规模或基线年龄异常，上游很可能重写了历史。复核后请用 workflow_dispatch 的 mode=reanchor 重跑。"
+          else
+            echo "::error::请人工解完冲突后重新跑一次本工作流。"
+          fi
           exit 1
 
       - name: Check upstream workflow drift
         if: always()
         run: |
-          recorded="$(tr -d '[:space:]' < custom/upstream/build-firmware.yml.sha 2>/dev/null || true)"
+          # 注意：该文件前几行是注释，必须先去注释再取 sha，
+          # 否则 tr -d '[:space:]' 会把注释文字一起留下，比对永远不相等（2026-11-22 修正）。
+          recorded="$(grep -vE '^[[:space:]]*#' custom/upstream/build-firmware.yml.sha 2>/dev/null | tr -d '[:space:]' || true)"
           current="$(git rev-parse parent/master:.github/workflows/build-firmware.yml 2>/dev/null || true)"
           echo "上游 build-firmware.yml blob=$current（本仓库记录的 hook 基线=$recorded）"
-          if [ -n "$recorded" ] && [ -n "$current" ] && [ "$recorded" != "$current" ]; then
+          if ! printf '%s' "$recorded" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::warning::custom/upstream/build-firmware.yml.sha 里没有有效的 40 位 blob sha"
+          elif [ -n "$current" ] && [ "$recorded" != "$current" ]; then
             echo "::warning::naoki66 更新了 .github/workflows/build-firmware.yml，本仓库仍用自己的定制版，需要手工把上游新改动合进来"
           fi
 
       - name: Push to origin
-        if: steps.merge.outputs.changed == 'true'
+        if: steps.sync.outputs.changed == 'true'
         run: git push origin HEAD:master
 
       - name: Show result
         if: always()
         run: |
           echo "=== Sync Result ==="
-          echo "本次已合并：${{ steps.merge.outputs.merged }}"
           git log --oneline -5 || true
           git status --short || true
