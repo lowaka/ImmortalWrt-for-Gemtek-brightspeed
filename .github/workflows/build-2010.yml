@@ -40,7 +40,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 固定 runner 镜像：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26，
+    # OpenWrt 的 host 工具链在 26 上未经验证。与 build-firmware.yml 保持一致。
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

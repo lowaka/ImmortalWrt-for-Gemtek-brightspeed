@@ -39,7 +39,9 @@ concurrency:
 
 jobs:
   sync-upstream:
-    runs-on: ubuntu-latest
+    # 固定 runner 镜像：ubuntu-latest 自 2026-10-19 起迁移到 Ubuntu 26。
+    # 本 job 只做 git 操作，风险不高，但统一钉住便于排查环境差异。
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
