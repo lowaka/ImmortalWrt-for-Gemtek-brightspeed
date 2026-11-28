@@ -17,7 +17,7 @@ diff --git a/npu.c b/npu.c
  	return nframes;
  }
  
-@@ -67,19 +72,31 @@ static struct sk_buff *mt76_npu_dequeue(struct mt76_dev *dev,
+@@ -67,19 +72,32 @@ static struct sk_buff *mt76_npu_dequeue(struct mt76_dev *dev,
  	int i, nframes, index = q->tail;
  	struct sk_buff *skb = NULL;
  
