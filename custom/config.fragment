@@ -246,3 +246,26 @@ CONFIG_USE_LLVM_HOST=y
 # CONFIG_PACKAGE_watchcat is not set
 # CONFIG_PACKAGE_luci-app-watchcat is not set
 # CONFIG_PACKAGE_luci-i18n-watchcat-zh-cn is not set
+
+# ============================================================
+# 2026-11-28 瘦身：XR1710G 清掉未使用的代理内核
+# ============================================================
+# XR1710G 的透明代理只用 daed（eBPF），**没有任何代理面板**，因此基础
+# 1710.config 里那套 xray / chinadns-ng / dns2socks 属于上游 AP 配置的遗留，
+# 没有任何组件会去调用它们。实测 xray-core 安装体积 11.17 MiB。
+#
+# 保留：daed / luci-app-daede / luci-app-pbr（策略路由）/ luci-app-easytier（组网）
+# 以及 v2ray-geoip、v2ray-geosite（daed 的 geoip: / geosite: 规则依赖）。
+#
+# microsocks / ipt2socks / tcping 体积都很小（合计不到 0.5 MiB），
+# 且 tcping 常用于排障，这里保留。
+
+# CONFIG_PACKAGE_xray-core is not set
+# CONFIG_PACKAGE_xray-plugin is not set
+# libcronet 是 xray 的 naive 出站依赖，geoview 是 geo 数据查看器，
+# 二者在 1710.config 里都是显式 =y，但都服务于已移除的 xray。
+# CONFIG_PACKAGE_libcronet is not set
+# CONFIG_PACKAGE_geoview is not set
+# CONFIG_PACKAGE_chinadns-ng is not set
+# CONFIG_PACKAGE_dns2socks is not set
+# CONFIG_PACKAGE_simple-obfs-client is not set

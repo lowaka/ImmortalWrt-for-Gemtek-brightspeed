@@ -260,3 +260,56 @@ CONFIG_USE_LLVM_HOST=y
 # 若宿主机工具链不可用，改用下面两行（代价：CI 里从源码构建 LLVM，慢且吃磁盘）：
 # CONFIG_BPF_TOOLCHAIN_BUILD_LLVM=y
 # CONFIG_USE_LLVM_BUILD=y
+
+# ============================================================
+# 2026-11-28 瘦身：彻底移除 Passwall 及其连带依赖
+# ============================================================
+# 依据：解包 11-22 产出的镜像（lib/apk/db/installed）得到的**实测**安装体积。
+# 该镜像安装后共 221.0 MiB，其中 Passwall 这条链占约 77 MiB：
+#   mosdns 17.73 / v2ray-plugin 15.97 / xray-core 11.17 /
+#   shadowsocks-rust-sslocal 7.70 / geoview 7.36 / libcronet 7.24 /
+#   haproxy 4.18 / luci-app-passwall 2.99 MiB …
+#
+# 关键事实：Passwall 的所有出站内核早已被关掉（INCLUDE_Xray / SingBox /
+# Shadowsocks_Rust_Client / V2ray_Plugin / Simple_Obfs / Haproxy 全 not set），
+# 它是一个**没有任何可用出站的空壳**，却仍会与 daed 争抢 nftables / TPROXY /
+# DNS 接管。此前只关了 INCLUDE_*，漏了主包本身。
+#
+# 同时清掉 ssr-plus 残留的死配置子项（其主包在基础 config 里已是 not set，
+# 这些子项会被 defconfig 强制关掉，写出来只为让 .config 可读）。
+#
+# 保留：daed / luci-app-daede / v2ray-geoip / v2ray-geosite
+# —— 后两者是 daed 的 geoip: / geosite: 规则依赖，不能删。
+
+# ---- Passwall 主包与数据包 ----
+# CONFIG_PACKAGE_luci-app-passwall is not set
+# CONFIG_PACKAGE_luci-i18n-passwall-zh-cn is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata is not set
+
+# ---- Passwall 拉进来的出站内核与库 ----
+# CONFIG_PACKAGE_xray-core is not set
+# CONFIG_PACKAGE_v2ray-plugin is not set
+# CONFIG_PACKAGE_shadowsocks-rust-sslocal is not set
+# CONFIG_PACKAGE_shadowsocksr-libev-ssr-local is not set
+# CONFIG_PACKAGE_shadowsocksr-libev-ssr-redir is not set
+# CONFIG_PACKAGE_simple-obfs-client is not set
+# CONFIG_PACKAGE_geoview is not set
+# CONFIG_PACKAGE_libcronet is not set
+# CONFIG_PACKAGE_haproxy is not set
+
+# ---- DNS 侧残留（daed 自己做 DNS 接管，不需要这些）----
+# CONFIG_PACKAGE_mosdns is not set
+# CONFIG_PACKAGE_chinadns-ng is not set
+# CONFIG_PACKAGE_dns2socks is not set
+# CONFIG_PACKAGE_dns2tcp is not set
+
+# ---- 辅助工具残留 ----
+# CONFIG_PACKAGE_ipt2socks is not set
+# CONFIG_PACKAGE_microsocks is not set
+# CONFIG_PACKAGE_tcping is not set
+
+# ---- ssr-plus 死配置子项 ----
+# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray is not set
+# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Rust_Client is not set
+# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_NONE_Server is not set
+# CONFIG_PACKAGE_luci-app-ssr-plus_Nftables_Transparent_Proxy is not set
